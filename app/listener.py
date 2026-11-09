@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 from pathlib import Path
 from typing import Optional, Sequence
@@ -44,9 +45,10 @@ class SourceListener:
         self._processing_lock = asyncio.Lock()
         self._poll_task: Optional[asyncio.Task[None]] = None
         self._stopping = False
+        self._startup_msg_id: int = 0
 
     async def initialize(self) -> None:
-        """Перевіряє доступність джерела та гарантує підписку (Join) userbot на канал."""
+        """Перевіряє доступність джерела, гарантує підписку (Join) та фіксує ID останнього поста при старті."""
         try:
             entity = await self.user_client.get_entity(self.settings.source_channel)
             logger.info("Канал-джерело знайдено: %s (id=%s)", getattr(entity, "title", self.settings.source_channel), entity.id)
@@ -56,6 +58,16 @@ class SourceListener:
                 logger.info("Userbot успішно приєднано (joined) до каналу: %s", self.settings.source_channel)
             except Exception as join_err:
                 logger.debug("Статус підписки на канал (можливо вже підписані): %s", join_err)
+
+            # Фіксуємо ID останнього наявного повідомлення на момент запуску,
+            # щоб catch-up polling не тягнув стару історію каналу в чергу!
+            latest = await self.user_client.get_messages(entity, limit=1)
+            if latest:
+                self._startup_msg_id = int(latest[0].id)
+                logger.info(
+                    "Зафіксовано стартовий ID каналу: startup_msg_id=%d (обраблятимуться лише новіші пости).",
+                    self._startup_msg_id,
+                )
         except Exception as exc:
             logger.error("Не вдалося ініціалізувати канал-джерело %s: %s", self.settings.source_channel, exc)
 
@@ -126,6 +138,12 @@ class SourceListener:
         if not messages:
             return
 
+        # Відсіюємо старі повідомлення, які вийшли ще ДО запуску бота
+        if self._startup_msg_id > 0:
+            messages = [m for m in messages if m.id > self._startup_msg_id]
+            if not messages:
+                return
+
         # Групуємо повідомлення за grouped_id (альбоми)
         albums: dict[int, list[Message]] = {}
         singles: list[Message] = []
@@ -172,6 +190,9 @@ class SourceListener:
             return
 
         source_msg_id = int(msg.id)
+        if self._startup_msg_id > 0 and source_msg_id < self._startup_msg_id:
+            return  # Ігноруємо редагування старих архівних постів
+
         existing = await self.storage.get_post_by_source_id(source_msg_id)
         if existing and existing.status != PostStatus.SKIPPED:
             return  # Пост уже в конвеєрі обробки або опублікований

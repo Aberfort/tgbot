@@ -98,9 +98,22 @@ class Storage:
         )
         await self.conn.commit()
 
-    async def cleanup_skipped_posts(self) -> int:
-        """Видаляє записи зі статусом SKIPPED, щоб вони могли бути повторно оброблені."""
-        cursor = await self.conn.execute("DELETE FROM posts WHERE status = ?", (PostStatus.SKIPPED.value,))
+    async def clear_stale_queued_posts(self, max_age_minutes: int = 15) -> int:
+        """Скасовує застарілі пости в черзі (QUEUED/REWRITTEN), щоб старі пости не публікувались із запізненням."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)).isoformat()
+        cursor = await self.conn.execute(
+            """
+            UPDATE posts
+            SET status = ?
+            WHERE status IN (?, ?) AND (created_at < ? OR source_msg_id < 276349)
+            """,
+            (
+                PostStatus.SKIPPED.value,
+                PostStatus.QUEUED.value,
+                PostStatus.REWRITTEN.value,
+                cutoff,
+            ),
+        )
         await self.conn.commit()
         return cursor.rowcount
 
