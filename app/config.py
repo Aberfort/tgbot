@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     api_id: int = Field(..., alias="API_ID", description="Telegram API ID з my.telegram.org")
     api_hash: SecretStr = Field(..., alias="API_HASH", description="Telegram API Hash з my.telegram.org")
     session_name: str = Field(default="sessions/userbot", alias="SESSION_NAME")
+    userbot_session_b64: Optional[SecretStr] = Field(default=None, alias="USERBOT_SESSION_B64")
+    userbot_session_b64_1: Optional[SecretStr] = Field(default=None, alias="USERBOT_SESSION_B64_1")
+    userbot_session_b64_2: Optional[SecretStr] = Field(default=None, alias="USERBOT_SESSION_B64_2")
     source_channel: Union[int, str] = Field(..., alias="SOURCE_CHANNEL")
 
     # Bot клієнт (публікація та модерація)
@@ -112,10 +115,61 @@ class Settings(BaseSettings):
             ) from exc
 
     def ensure_directories(self) -> None:
-        """Створює необхідні директорії та обмежує права доступу до файлів сесій (0700 / 0600)."""
+        """Створює необхідні директорії, відновлює сесію з base64 (якщо вказано) та обмежує права доступу."""
+        import base64
+
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.media_tmp_dir.mkdir(parents=True, exist_ok=True)
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Відновлення файлу userbot.session зі змінної USERBOT_SESSION_B64 (або частин B64_1 + B64_2)
+        b64_val = ""
+        if self.userbot_session_b64 and self.userbot_session_b64.get_secret_value().strip():
+            b64_val = self.userbot_session_b64.get_secret_value().strip()
+        elif self.userbot_session_b64_1 and self.userbot_session_b64_1.get_secret_value().strip():
+            p1 = self.userbot_session_b64_1.get_secret_value().strip()
+            p2 = self.userbot_session_b64_2.get_secret_value().strip() if self.userbot_session_b64_2 else ""
+            b64_val = p1 + p2
+        else:
+            p1 = os.getenv("USERBOT_SESSION_B64_1", "").strip()
+            p2 = os.getenv("USERBOT_SESSION_B64_2", "").strip()
+            if p1 or p2:
+                b64_val = p1 + p2
+
+        u_sess = Path(f"{self.session_name}.session")
+
+        def is_valid_session_file(sess_file: Path) -> bool:
+            if not sess_file.exists() or sess_file.stat().st_size == 0:
+                return False
+            try:
+                import sqlite3
+                with sqlite3.connect(sess_file) as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT auth_key FROM sessions WHERE auth_key IS NOT NULL LIMIT 1")
+                    row = cur.fetchone()
+                    return bool(row and row[0])
+            except Exception:
+                return False
+
+        force_restore = os.getenv("FORCE_RESTORE_SESSION", "").lower() in ("1", "true", "yes")
+        is_valid = is_valid_session_file(u_sess)
+        print(f"[INIT] Session target path: {u_sess.resolve()}, exists={u_sess.exists()}, valid_auth={is_valid}, b64_len={len(b64_val)}")
+
+        if b64_val and (force_restore or not is_valid):
+            import gzip
+
+            u_sess.parent.mkdir(parents=True, exist_ok=True)
+            raw_bytes = base64.b64decode(b64_val)
+            try:
+                raw_bytes = gzip.decompress(raw_bytes)
+            except Exception as e:
+                print(f"[INIT] Gzip decompress note: {e}")
+            u_sess.write_bytes(raw_bytes)
+            try:
+                os.chmod(u_sess, 0o600)
+            except OSError:
+                pass
+            print(f"[INIT] Restored userbot session: {u_sess.resolve()} ({u_sess.stat().st_size} bytes)")
 
         for sess_prefix in (self.session_name, self.bot_session_name):
             sess_dir = Path(sess_prefix).parent
