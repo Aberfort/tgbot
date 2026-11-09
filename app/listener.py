@@ -74,7 +74,12 @@ class SourceListener:
                 func=lambda e: e.grouped_id is None,
             ),
         )
-        logger.info("Слухач джерела підписано на події каналу: %s", self.settings.source_channel)
+        # 3. Обробник редагованих повідомлень (коли автор додає підпис через 5-30 секунд)
+        self.user_client.add_event_handler(
+            self._on_message_edited,
+            events.MessageEdited(chats=[self.settings.source_channel]),
+        )
+        logger.info("Слухач джерела підписано на події каналу (включно з редагуванням): %s", self.settings.source_channel)
 
         # Запускаємо фоновий catch-up polling (кожні 45 секунд) для гарантованого перехоплення,
         # навіть якщо Telegram скинув сокет або ПК засинав.
@@ -111,9 +116,9 @@ class SourceListener:
                 break
 
     async def _poll_latest_messages(self) -> None:
-        """Запитує останні 10 повідомлень із каналу та обробляє нові."""
+        """Запитує останні 25 повідомлень із каналу та обробляє нові."""
         try:
-            messages = await self.user_client.get_messages(self.settings.source_channel, limit=10)
+            messages = await self.user_client.get_messages(self.settings.source_channel, limit=25)
         except Exception as exc:
             logger.debug("Не вдалося отримати останні повідомлення: %s", exc)
             return
@@ -159,6 +164,33 @@ class SourceListener:
         """Обробляє одиночний пост без альбому."""
         await self._process_messages([event.message], grouped_id=None)
 
+    async def _on_message_edited(self, event: events.MessageEdited.Event) -> None:
+        """Обробляє редагування повідомлення (коли автор додає підпис через 5-30 секунд)."""
+        msg: Message = event.message
+        text = (msg.raw_text or "").strip()
+        if not text:
+            return
+
+        source_msg_id = int(msg.id)
+        existing = await self.storage.get_post_by_source_id(source_msg_id)
+        if existing and existing.status != PostStatus.SKIPPED:
+            return  # Пост уже в конвеєрі обробки або опублікований
+
+        logger.info(
+            "Повідомлення source_msg_id=%d відредаговано з новим текстом (%d симв). Запускаємо обробку...",
+            source_msg_id,
+            len(text),
+        )
+        if msg.grouped_id:
+            try:
+                latest = await self.user_client.get_messages(self.settings.source_channel, limit=15)
+                album_msgs = [m for m in latest if m.grouped_id == msg.grouped_id] or [msg]
+                await self._process_messages(album_msgs, grouped_id=msg.grouped_id)
+            except Exception as exc:
+                logger.error("Помилка обробки відредагованого альбому grouped_id=%s: %s", msg.grouped_id, exc)
+        else:
+            await self._process_messages([msg], grouped_id=None)
+
     async def _process_messages(
         self,
         messages: Sequence[Message],
@@ -175,6 +207,39 @@ class SourceListener:
         combined_text = "\n\n".join(
             (m.raw_text or "").strip() for m in messages if (m.raw_text or "").strip()
         ).strip()
+
+        has_media = any(getattr(m, "media", None) is not None for m in messages)
+        # Якщо в пості є медіа (фото/відео), але текст порожній:
+        # Автори каналу часто публікують медіа, а підпис додають через кілька секунд!
+        if not combined_text and has_media:
+            logger.info(
+                "Пост source_msg_id=%d має медіа, але текст поки відсутній. Очікуємо 3 сек на підпис...",
+                source_msg_id,
+            )
+            await asyncio.sleep(3)
+            try:
+                if grouped_id:
+                    latest = await self.user_client.get_messages(self.settings.source_channel, limit=15)
+                    matched = [m for m in latest if m.grouped_id == grouped_id]
+                    if matched:
+                        messages = matched
+                else:
+                    refreshed = await self.user_client.get_messages(self.settings.source_channel, ids=source_msg_id)
+                    if refreshed:
+                        messages = [refreshed]
+                combined_text = "\n\n".join(
+                    (m.raw_text or "").strip() for m in messages if (m.raw_text or "").strip()
+                ).strip()
+                if combined_text:
+                    logger.info(
+                        "Для поста source_msg_id=%d успішно підтягнуто доданий текст (%d симв): %s...",
+                        source_msg_id,
+                        len(combined_text),
+                        combined_text[:40],
+                    )
+            except Exception as e:
+                logger.debug("Помилка оновлення тексту для source_msg_id=%d: %s", source_msg_id, e)
+
         text_hash = compute_text_hash(combined_text)
 
         async with self._processing_lock:

@@ -111,18 +111,38 @@ class Storage:
         grouped_id: Optional[int] = None,
     ) -> bool:
         """Перевіряє, чи оброблявся вже пост за source_msg_id, grouped_id або хешем тексту."""
+        query = "SELECT status, hash FROM posts WHERE source_msg_id = ?"
+        params: list = [source_msg_id]
         if grouped_id is not None:
-            cursor = await self.conn.execute(
-                "SELECT 1 FROM posts WHERE source_msg_id = ? OR grouped_id = ? OR (hash = ? AND hash != '') LIMIT 1",
-                (source_msg_id, grouped_id, text_hash),
-            )
-        else:
-            cursor = await self.conn.execute(
-                "SELECT 1 FROM posts WHERE source_msg_id = ? OR (hash = ? AND hash != '') LIMIT 1",
-                (source_msg_id, text_hash),
-            )
+            query += " OR grouped_id = ?"
+            params.append(grouped_id)
+        if text_hash and not text_hash.startswith("skipped_"):
+            query += " OR (hash = ? AND hash != '')"
+            params.append(text_hash)
+        query += " LIMIT 1"
+
+        cursor = await self.conn.execute(query, tuple(params))
         row = await cursor.fetchone()
-        return row is not None
+        if row is None:
+            return False
+
+        status, existing_hash = row[0], row[1]
+        # Якщо пост раніше було пропущено (SKIPPED), а тепер для нього є валідний текст:
+        # це не дублікат — старий запис видаляється, щоб пост пішов на повноцінну обробку!
+        if status == PostStatus.SKIPPED.value and text_hash and not text_hash.startswith("skipped_"):
+            await self.conn.execute(
+                "DELETE FROM posts WHERE source_msg_id = ?",
+                (source_msg_id,),
+            )
+            if grouped_id is not None:
+                await self.conn.execute(
+                    "DELETE FROM posts WHERE grouped_id = ?",
+                    (grouped_id,),
+                )
+            await self.conn.commit()
+            return False
+
+        return True
 
     async def create_post(
         self,
@@ -133,12 +153,12 @@ class Storage:
         grouped_id: Optional[int] = None,
         media_paths: Optional[list[str]] = None,
     ) -> int:
-        """Створює новий запис у таблиці posts і повертає його внутрішній ID."""
+        """Створює або оновлює запис у таблиці posts і повертає його внутрішній ID."""
         now_iso = datetime.now(timezone.utc).isoformat()
         media_json = json.dumps(media_paths or [], ensure_ascii=False)
         cursor = await self.conn.execute(
             """
-            INSERT INTO posts (
+            INSERT OR REPLACE INTO posts (
                 source_msg_id, grouped_id, status, original_text,
                 rewritten_text, hash, media_paths, created_at, published_at
             )
@@ -201,6 +221,14 @@ class Storage:
     async def get_post(self, post_id: int) -> Optional[PostRecord]:
         """Отримує запис поста за його первинним ключем id."""
         cursor = await self.conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,))
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_record(row)
+
+    async def get_post_by_source_id(self, source_msg_id: int) -> Optional[PostRecord]:
+        """Отримує запис поста за його source_msg_id."""
+        cursor = await self.conn.execute("SELECT * FROM posts WHERE source_msg_id = ?", (source_msg_id,))
         row = await cursor.fetchone()
         if row is None:
             return None
