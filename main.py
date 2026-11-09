@@ -62,8 +62,8 @@ async def run() -> None:
     storage = Storage(settings.db_path)
     await storage.connect()
 
-    api_hash_str = settings.api_hash.get_secret_value()
-    bot_token_str = settings.bot_token.get_secret_value()
+    api_hash_str = settings.api_hash.get_secret_value() if hasattr(settings.api_hash, "get_secret_value") else str(settings.api_hash)
+    bot_token_str = settings.bot_token.get_secret_value() if hasattr(settings.bot_token, "get_secret_value") else str(settings.bot_token)
 
     # Клієнт №1: MTProto Userbot (читання чужого публічного каналу)
     user_client = TelegramClient(
@@ -148,12 +148,9 @@ async def run() -> None:
         # Захищаємо створені файли сесій правами 0600
         settings.ensure_directories()
 
-        # Кешуємо entity джерела та цільового каналу при старті для перевірки доступу
-        source_entity = await user_client.get_entity(settings.source_channel)
-        logger.info(
-            "Канал-джерело знайдено: %s",
-            getattr(source_entity, "title", settings.source_channel),
-        )
+        # Ініціалізація та автопідписка на джерело
+        await listener.initialize()
+
         target_entity = await bot_client.get_entity(settings.target_channel)
         logger.info(
             "Цільовий канал знайдено: %s",
@@ -175,6 +172,7 @@ async def run() -> None:
 
     finally:
         logger.info("Виконується graceful shutdown...")
+        await listener.stop()
         await publisher.stop()
         if user_client.is_connected():
             await user_client.disconnect()

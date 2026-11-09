@@ -172,11 +172,17 @@ class Rewriter:
             f"<source_post>\n{safe_source}\n</source_post>"
         )
 
+        models_to_try = [self.model_name]
+        for fallback in ("gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.8-flash"):
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+
         last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
+            model_for_attempt = models_to_try[(attempt - 1) % len(models_to_try)]
             try:
                 response = await self.client.aio.models.generate_content(
-                    model=self.model_name,
+                    model=model_for_attempt,
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
@@ -201,7 +207,8 @@ class Rewriter:
 
                 delay = self.base_delay * (2 ** (attempt - 1))
                 logger.warning(
-                    "Помилка LLM (спроба %d/%d): %s. Повтор через %.1f сек...",
+                    "Помилка LLM з моделлю %s (спроба %d/%d): %s. Повтор через %.1f сек...",
+                    model_for_attempt,
                     attempt,
                     self.max_retries,
                     exc,

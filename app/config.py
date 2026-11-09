@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # Налаштування LLM (Gemini API; підтримується також ANTHROPIC_API_KEY як фолбек)
     gemini_api_key: Optional[SecretStr] = Field(default=None, alias="GEMINI_API_KEY")
     anthropic_api_key: Optional[SecretStr] = Field(default=None, alias="ANTHROPIC_API_KEY")
-    llm_model: str = Field(default="gemini-2.5-flash", alias="LLM_MODEL")
+    llm_model: str = Field(default="gemini-3.5-flash", alias="LLM_MODEL")
     prompt_file: Path = Field(default=Path("prompts/rewrite.txt"), alias="PROMPT_FILE")
 
     # Модерація та фільтри

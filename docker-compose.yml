@@ -21,5 +21,7 @@ services:
       - ./logs:/app/logs
       - ./prompts:/app/prompts:ro
       - ./login.py:/app/login.py:ro
+      - ./app:/app/app:ro
+      - ./main.py:/app/main.py:ro
     stdin_open: true
     tty: true

@@ -1,4 +1,4 @@
-"""Модуль моніторингу джерела (Telethon userbot) для одиночних повідомлень та медіа-альбомів."""
+"""Модуль моніторингу джерела (Telethon userbot) з автопідпискою, realtime-подіями та catch-up polling."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Optional, Sequence
 
 from telethon import TelegramClient, events
 from telethon.tl.custom.message import Message
+from telethon.tl.functions.channels import JoinChannelRequest
 
 from app.config import Settings
 from app.filters import PostFilter, compute_text_hash
@@ -41,6 +42,22 @@ class SourceListener:
         self.publisher = publisher
         self.moderation = moderation
         self._processing_lock = asyncio.Lock()
+        self._poll_task: Optional[asyncio.Task[None]] = None
+        self._stopping = False
+
+    async def initialize(self) -> None:
+        """Перевіряє доступність джерела та гарантує підписку (Join) userbot на канал."""
+        try:
+            entity = await self.user_client.get_entity(self.settings.source_channel)
+            logger.info("Канал-джерело знайдено: %s (id=%s)", getattr(entity, "title", self.settings.source_channel), entity.id)
+            # В Telegram MTProto оновлення приходять лише для каналів, на які акаунт підписаний!
+            try:
+                await self.user_client(JoinChannelRequest(entity))
+                logger.info("Userbot успішно приєднано (joined) до каналу: %s", self.settings.source_channel)
+            except Exception as join_err:
+                logger.debug("Статус підписки на канал (можливо вже підписані): %s", join_err)
+        except Exception as exc:
+            logger.error("Не вдалося ініціалізувати канал-джерело %s: %s", self.settings.source_channel, exc)
 
     def register_handlers(self) -> None:
         """Реєструє обробники events.Album та events.NewMessage для каналу-джерела."""
@@ -57,7 +74,78 @@ class SourceListener:
                 func=lambda e: e.grouped_id is None,
             ),
         )
-        logger.info("Слухач джерела підписано на канал: %s", self.settings.source_channel)
+        logger.info("Слухач джерела підписано на події каналу: %s", self.settings.source_channel)
+
+        # Запускаємо фоновий catch-up polling (кожні 45 секунд) для гарантованого перехоплення,
+        # навіть якщо Telegram скинув сокет або ПК засинав.
+        if self._poll_task is None or self._poll_task.done():
+            self._stopping = False
+            self._poll_task = asyncio.create_task(self._catchup_poll_loop(), name="source_catchup_poll")
+            logger.info("Фоновий catch-up polling запущено (інтервал 45 сек).")
+
+    async def stop(self) -> None:
+        """Зупиняє фоновий polling під час graceful shutdown."""
+        self._stopping = True
+        if self._poll_task is not None and not self._poll_task.done():
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _catchup_poll_loop(self) -> None:
+        """Періодично перевіряє останні повідомлення каналу для 100% надійності."""
+        # Невелика пауза при старті, щоб завершилась ініціалізація
+        await asyncio.sleep(5)
+        while not self._stopping:
+            try:
+                await self._poll_latest_messages()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("Помилка під час catch-up polling: %s", exc)
+
+            try:
+                await asyncio.sleep(45)
+            except asyncio.CancelledError:
+                break
+
+    async def _poll_latest_messages(self) -> None:
+        """Запитує останні 10 повідомлень із каналу та обробляє нові."""
+        try:
+            messages = await self.user_client.get_messages(self.settings.source_channel, limit=10)
+        except Exception as exc:
+            logger.debug("Не вдалося отримати останні повідомлення: %s", exc)
+            return
+
+        if not messages:
+            return
+
+        # Групуємо повідомлення за grouped_id (альбоми)
+        albums: dict[int, list[Message]] = {}
+        singles: list[Message] = []
+
+        for msg in reversed(messages):
+            if msg.grouped_id:
+                albums.setdefault(msg.grouped_id, []).append(msg)
+            else:
+                singles.append(msg)
+
+        # Обробляємо спочатку альбоми, потім одиночні
+        for grouped_id, album_msgs in albums.items():
+            primary = album_msgs[0]
+            text = "\n\n".join((m.raw_text or "").strip() for m in album_msgs if (m.raw_text or "").strip()).strip()
+            thash = compute_text_hash(text)
+            if not await self.storage.is_duplicate(primary.id, thash, grouped_id=grouped_id):
+                logger.info("Catch-up poll виявив новий альбом grouped_id=%s (msg id=%d)", grouped_id, primary.id)
+                await self._process_messages(album_msgs, grouped_id=grouped_id)
+
+        for s_msg in singles:
+            stext = (s_msg.raw_text or "").strip()
+            thash = compute_text_hash(stext)
+            if not await self.storage.is_duplicate(s_msg.id, thash, grouped_id=None):
+                logger.info("Catch-up poll виявив новий одиночний пост msg id=%d", s_msg.id)
+                await self._process_messages([s_msg], grouped_id=None)
 
     async def _on_album(self, event: events.Album.Event) -> None:
         """Обробляє медіа-альбом (кілька фото/відео з однаковим grouped_id) як один пост."""
@@ -178,7 +266,6 @@ class SourceListener:
         max_bytes = self.settings.max_media_size_mb * 1024 * 1024
 
         for idx, msg in enumerate(messages, start=1):
-            # Завантажуємо лише фото та відео/документи, ігноруючи прев'ю веб-сторінок (MessageMediaWebPage)
             if msg.photo is None and msg.video is None and msg.document is None:
                 continue
 
