@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from telethon import Button, TelegramClient, events
+from telethon.extensions import html as tg_html
 
 from app.publisher import Publisher
 from app.rewriter import Rewriter
@@ -142,17 +143,20 @@ class ModerationManager:
 
         if action == "pub":
             self._awaiting_edit.pop(self.admin_user_id, None)
-            if post.status == PostStatus.PUBLISHED:
-                await event.answer("Цей пост уже опубліковано!", alert=True)
+            if post.status in (PostStatus.PUBLISHED, PostStatus.QUEUED):
+                await event.answer("Цей пост уже в черзі або опубліковано!", alert=True)
                 return
 
             await self.publisher.enqueue(post.id)
             await event.answer("Додано в чергу на публікацію!")
-            await event.edit(
-                f"✅ <b>Пост #{post.id} схвалено та додано в чергу публікації.</b>\n\n"
-                f"{post.rewritten_text or post.original_text}",
+            try:
+                await event.edit(buttons=None)
+            except Exception:
+                pass
+            await self.bot_client.send_message(
+                entity=self.admin_user_id,
+                message=f"✅ <b>Пост #{post.id} схвалено та додано в чергу публікації.</b>",
                 parse_mode="html",
-                buttons=None,
             )
 
         elif action == "edit":
@@ -162,7 +166,7 @@ class ModerationManager:
                 entity=self.admin_user_id,
                 message=(
                     f"✏️ <b>Режим редагування поста #{post.id}</b>\n"
-                    f"Надішліть новий текст повідомленням (підтримується HTML-розмітка: "
+                    f"Надішліть новий текст повідомленням (підтримується форматування Telegram або HTML-розмітка: "
                     f"<code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;a href='...'&gt;</code>). "
                     f"Футер каналу буде додано автоматично, якщо його ще немає в тексті.\n"
                     f"Щоб скасувати редагування, натисніть кнопку нижче."
@@ -181,11 +185,14 @@ class ModerationManager:
             await self.storage.update_status(post.id, PostStatus.SKIPPED)
             self.publisher.cleanup_media(post.media_paths)
             await event.answer("Пост відхилено.")
-            await event.edit(
-                f"❌ <b>Пост #{post.id} відхилено модератором.</b>",
-                parse_mode="html",
-                buttons=None,
-            )
+            try:
+                await event.edit(
+                    f"❌ <b>Пост #{post.id} відхилено модератором.</b>",
+                    parse_mode="html",
+                    buttons=None,
+                )
+            except Exception:
+                await event.edit(buttons=None)
             logger.info("Пост id=%d відхилено адміністратором.", post.id)
 
     async def _on_admin_message(self, event: events.NewMessage.Event) -> None:
@@ -193,7 +200,6 @@ class ModerationManager:
         if event.sender_id != self.admin_user_id:
             return
 
-        # Ігноруємо власні або службові команди
         raw_text = (event.raw_text or "").strip()
         if not raw_text or raw_text.startswith("/"):
             return
@@ -208,13 +214,20 @@ class ModerationManager:
             await event.reply("⚠️ Пост не знайдено в БД.")
             return
 
-        # Отримуємо текст з HTML-форматуванням (якщо адмін форматував текст засобами клієнта Telegram)
-        new_text = (event.message.text or raw_text).strip()
+        # Якщо адмін форматував текст через клієнт Telegram (entities), конвертуємо їх у HTML
+        if event.message.entities:
+            new_text = tg_html.unparse(event.message.raw_text, event.message.entities).strip()
+        else:
+            new_text = raw_text
+
         has_media = len(post.media_paths) > 0
         if self.rewriter.footer_text and self.rewriter.footer_text not in new_text:
             formatted_text = self.rewriter.format_with_footer(new_text, has_media=has_media)
         else:
-            formatted_text = new_text
+            formatted_text = self.rewriter.format_with_footer(
+                new_text.replace(self.rewriter.footer_text, "").strip(),
+                has_media=has_media,
+            )
 
         await self.storage.update_rewritten(
             post_id=post.id,

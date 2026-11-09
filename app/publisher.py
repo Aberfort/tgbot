@@ -1,9 +1,10 @@
-"""Модуль публікації постів у цільовий канал із чергою, лімітами, тихими годинами та очищенням медіа."""
+"""Модуль публікації постів у цільовий канал із чергою, відновленням стану, лімітами та очищенням медіа."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from datetime import datetime, time
 from pathlib import Path
 from typing import Optional
@@ -33,12 +34,38 @@ class Publisher:
         self._worker_task: Optional[asyncio.Task[None]] = None
         self._stopping = False
 
-    def start(self) -> None:
-        """Запускає фоновий воркер черги публікацій."""
+    async def start(self) -> None:
+        """Відновлює невідправлені пости після рестарту, очищує залишкові медіа та запускає воркер черги."""
+        await self._recover_pending_queue()
+        await self._cleanup_orphaned_media_dirs()
+
         if self._worker_task is None or self._worker_task.done():
             self._stopping = False
             self._worker_task = asyncio.create_task(self._worker_loop(), name="publisher_worker")
             logger.info("Воркер черги публікацій запущено.")
+
+    async def _recover_pending_queue(self) -> None:
+        """Завантажує з БД пости у статусі QUEUED (та REWRITTEN при вимкненій модерації) після рестарту."""
+        post_ids = await self.storage.get_queued_post_ids(
+            include_rewritten=not self.settings.moderation,
+        )
+        for pid in post_ids:
+            await self._queue.put(pid)
+        if post_ids:
+            logger.info("Відновлено %d постів у чергу публікації після перезапуску.", len(post_ids))
+
+    async def _cleanup_orphaned_media_dirs(self) -> None:
+        """Видаляє залишкові папки post_<id> у tmp_media, якщо відповідні пости вже завершені."""
+        tmp_root = self.settings.media_tmp_dir
+        if not tmp_root.exists():
+            return
+        active_ids = await self.storage.get_active_post_ids()
+        for child in tmp_root.iterdir():
+            if child.is_dir() and child.name.startswith("post_"):
+                suffix = child.name.removeprefix("post_")
+                if suffix.isdigit() and int(suffix) not in active_ids:
+                    shutil.rmtree(child, ignore_errors=True)
+                    logger.debug("Видалено залишкову директорію медіа: %s", child)
 
     async def stop(self) -> None:
         """Зупиняє фоновий воркер черги публікацій (graceful shutdown)."""
@@ -52,7 +79,8 @@ class Publisher:
         logger.info("Воркер черги публікацій зупинено.")
 
     async def enqueue(self, post_id: int) -> None:
-        """Додає ID поста до черги на публікацію."""
+        """Зберігає статус QUEUED у БД та додає ID поста до черги на публікацію."""
+        await self.storage.update_status(post_id, PostStatus.QUEUED)
         await self._queue.put(post_id)
         logger.info(
             "Пост id=%d додано в чергу публікації (у черзі: %d).",
@@ -105,6 +133,9 @@ class Publisher:
                 post = await self.storage.get_post(post_id)
                 if post is None:
                     logger.warning("Пост id=%d не знайдено в БД перед публікацією.", post_id)
+                    continue
+                if post.status == PostStatus.PUBLISHED:
+                    logger.info("Пост id=%d вже був опублікований раніше. Пропускаємо.", post_id)
                     continue
 
                 await self.publish_post_now(post)

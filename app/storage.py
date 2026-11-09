@@ -21,6 +21,7 @@ class PostStatus(str, Enum):
     NEW = "new"
     REWRITTEN = "rewritten"
     PENDING_REVIEW = "pending_review"
+    QUEUED = "queued"
     PUBLISHED = "published"
     FAILED = "failed"
     SKIPPED = "skipped"
@@ -213,6 +214,34 @@ class Storage:
         row = await cursor.fetchone()
         return int(row["cnt"]) if row else 0
 
+    async def get_queued_post_ids(self, include_rewritten: bool = False) -> list[int]:
+        """Повертає список ID постів, які очікували публікації до перезапуску бота."""
+        statuses = [PostStatus.QUEUED.value]
+        if include_rewritten:
+            statuses.append(PostStatus.REWRITTEN.value)
+        placeholders = ",".join("?" for _ in statuses)
+        cursor = await self.conn.execute(
+            f"SELECT id FROM posts WHERE status IN ({placeholders}) ORDER BY id ASC",
+            tuple(statuses),
+        )
+        rows = await cursor.fetchall()
+        return [int(r["id"]) for r in rows]
+
+    async def get_active_post_ids(self) -> set[int]:
+        """Повертає множину ID активних постів, чиї медіафайли ще потрібні."""
+        active_statuses = (
+            PostStatus.NEW.value,
+            PostStatus.REWRITTEN.value,
+            PostStatus.PENDING_REVIEW.value,
+            PostStatus.QUEUED.value,
+        )
+        cursor = await self.conn.execute(
+            "SELECT id FROM posts WHERE status IN (?, ?, ?, ?)",
+            active_statuses,
+        )
+        rows = await cursor.fetchall()
+        return {int(r["id"]) for r in rows}
+
     @staticmethod
     def _row_to_record(row: aiosqlite.Row) -> PostRecord:
         """Конвертує рядок SQLite у датаклас PostRecord."""
@@ -220,11 +249,15 @@ class Storage:
             media_paths = json.loads(row["media_paths"]) if row["media_paths"] else []
         except json.JSONDecodeError:
             media_paths = []
+        try:
+            status = PostStatus(row["status"])
+        except ValueError:
+            status = PostStatus.NEW
         return PostRecord(
             id=int(row["id"]),
             source_msg_id=int(row["source_msg_id"]),
             grouped_id=int(row["grouped_id"]) if row["grouped_id"] is not None else None,
-            status=PostStatus(row["status"]),
+            status=status,
             original_text=str(row["original_text"]),
             rewritten_text=str(row["rewritten_text"]) if row["rewritten_text"] is not None else None,
             text_hash=str(row["hash"]),

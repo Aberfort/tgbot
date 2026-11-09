@@ -1,0 +1,37 @@
+# Секрети та конфігурація оточення
+.env
+.env.*
+!.env.example
+
+# Сесії Telethon (МІСТЯТЬ ПОВНИЙ ДОСТУП ДО АКАУНТА!)
+sessions/
+*.session
+*.session-journal
+
+# База даних SQLite та тимчасові медіафайли
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Логи
+logs/
+*.log
+*.log.*
+
+# Python кеш та віртуальні оточення
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Системні файли macOS / IDE
+.DS_Store
+.idea/
+.vscode/
+

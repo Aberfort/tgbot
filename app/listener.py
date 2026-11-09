@@ -135,7 +135,7 @@ class SourceListener:
             grouped_id,
         )
 
-        # Завантаження медіафайлів (фото / відео) у тимчасову теку
+        # Завантаження медіафайлів (фото / відео) у тимчасову теку з перевіркою ліміту розміру
         media_paths = await self._download_media_files(post_id=post_id, messages=messages)
         if media_paths:
             await self.storage.update_media_paths(post_id=post_id, media_paths=media_paths)
@@ -172,13 +172,24 @@ class SourceListener:
         post_id: int,
         messages: Sequence[Message],
     ) -> list[str]:
-        """Завантажує фото та відео з повідомлень джерела у тимчасову директорію поста."""
+        """Завантажує фото та відео з повідомлень джерела, контролюючи максимальний розмір файлу."""
         post_dir: Path = self.settings.media_tmp_dir / f"post_{post_id}"
         downloaded: list[str] = []
+        max_bytes = self.settings.max_media_size_mb * 1024 * 1024
 
         for idx, msg in enumerate(messages, start=1):
             # Завантажуємо лише фото та відео/документи, ігноруючи прев'ю веб-сторінок (MessageMediaWebPage)
             if msg.photo is None and msg.video is None and msg.document is None:
+                continue
+
+            file_size = getattr(msg.file, "size", 0) or 0
+            if file_size > max_bytes:
+                logger.warning(
+                    "Медіафайл у повідомленні id=%d перевищує ліміт (%d МБ > %d МБ). Пропускаємо файл.",
+                    msg.id,
+                    file_size // (1024 * 1024),
+                    self.settings.max_media_size_mb,
+                )
                 continue
 
             post_dir.mkdir(parents=True, exist_ok=True)

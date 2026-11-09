@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+sessions/
+*.session
+*.session-journal
+data/
+logs/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+README.md
+

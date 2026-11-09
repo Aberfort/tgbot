@@ -62,11 +62,18 @@ async def run() -> None:
     storage = Storage(settings.db_path)
     await storage.connect()
 
+    api_hash_str = settings.api_hash.get_secret_value()
+    bot_token_str = settings.bot_token.get_secret_value()
+
     # Клієнт №1: MTProto Userbot (читання чужого публічного каналу)
     user_client = TelegramClient(
         session=settings.session_name,
         api_id=settings.api_id,
-        api_hash=settings.api_hash,
+        api_hash=api_hash_str,
+        device_model="Desktop",
+        system_version="macOS 14.5",
+        app_version="5.4.1 x64",
+        lang_code="uk",
         auto_reconnect=True,
         connection_retries=None,  # Нескінченні спроби перепідключення при обриві мережі
         retry_delay=5,
@@ -76,7 +83,7 @@ async def run() -> None:
     bot_client = TelegramClient(
         session=settings.bot_session_name,
         api_id=settings.api_id,
-        api_hash=settings.api_hash,
+        api_hash=api_hash_str,
         auto_reconnect=True,
         connection_retries=None,
         retry_delay=5,
@@ -134,9 +141,12 @@ async def run() -> None:
         logger.info("Userbot авторизовано як: %s (id=%d)", me_user.first_name, me_user.id)
 
         logger.info("Запуск Bot-клієнта...")
-        await bot_client.start(bot_token=settings.bot_token)
+        await bot_client.start(bot_token=bot_token_str)
         me_bot = await bot_client.get_me()
         logger.info("Бот авторизовано як: @%s (id=%d)", me_bot.username, me_bot.id)
+
+        # Захищаємо створені файли сесій правами 0600
+        settings.ensure_directories()
 
         # Кешуємо entity джерела та цільового каналу при старті для перевірки доступу
         source_entity = await user_client.get_entity(settings.source_channel)
@@ -153,7 +163,7 @@ async def run() -> None:
         # Реєстрація обробників та запуск черги публікації
         moderation.register_handlers()
         listener.register_handlers()
-        publisher.start()
+        await publisher.start()
 
         logger.info(
             "Бот повністю готовий до роботи! Режим модерації: %s",

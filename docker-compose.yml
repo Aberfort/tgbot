@@ -7,10 +7,19 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - ./sessions:/app/sessions
       - ./data:/app/data
       - ./logs:/app/logs
       - ./prompts:/app/prompts:ro
+      - ./login.py:/app/login.py:ro
     stdin_open: true
     tty: true

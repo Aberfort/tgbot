@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Копіюємо код проєкту та промпти
 COPY app/ ./app/
 COPY prompts/ ./prompts/
-COPY main.py .
+COPY main.py login.py ./
 
 # Створюємо директорії для томів (сесії, база даних, логи)
 RUN mkdir -p /app/sessions /app/data/tmp_media /app/logs
