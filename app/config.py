@@ -145,15 +145,15 @@ class Settings(BaseSettings):
                 import sqlite3
                 with sqlite3.connect(sess_file) as conn:
                     cur = conn.cursor()
-                    cur.execute("SELECT auth_key FROM sessions WHERE auth_key IS NOT NULL LIMIT 1")
-                    row = cur.fetchone()
-                    return bool(row and row[0])
+                    cur.execute("SELECT count(*) FROM entities")
+                    cnt = cur.fetchone()[0]
+                    return cnt > 0
             except Exception:
                 return False
 
         force_restore = os.getenv("FORCE_RESTORE_SESSION", "").lower() in ("1", "true", "yes")
         is_valid = is_valid_session_file(u_sess)
-        print(f"[INIT] Session target path: {u_sess.resolve()}, exists={u_sess.exists()}, valid_auth={is_valid}, b64_len={len(b64_val)}")
+        print(f"[INIT] Session target path: {u_sess.resolve()}, exists={u_sess.exists()}, valid_auth={is_valid}, b64_len={len(b64_val)}, force={force_restore}")
 
         if b64_val and (force_restore or not is_valid):
             import gzip
