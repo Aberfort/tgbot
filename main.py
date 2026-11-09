@@ -61,6 +61,9 @@ async def run() -> None:
 
     storage = Storage(settings.db_path)
     await storage.connect()
+    cleared = await storage.cleanup_skipped_posts()
+    if cleared > 0:
+        logger.info("Видалено %d раніше пропущених (SKIPPED) постів для повторного аналізу.", cleared)
 
     api_hash_str = settings.api_hash.get_secret_value() if hasattr(settings.api_hash, "get_secret_value") else str(settings.api_hash)
     bot_token_str = settings.bot_token.get_secret_value() if hasattr(settings.bot_token, "get_secret_value") else str(settings.bot_token)

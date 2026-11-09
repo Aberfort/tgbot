@@ -27,9 +27,9 @@ def compute_text_hash(text: str) -> str:
 
 
 class PostFilter:
-    """Перевіряє повідомлення з каналу-джерела на репости, довжину та стоп-слова."""
+    """Перевіряє повідомлення з каналу-джерела на репости та стоп-слова."""
 
-    def __init__(self, min_length: int, stop_words: Sequence[str]) -> None:
+    def __init__(self, stop_words: Sequence[str] = (), min_length: int = 0) -> None:
         self.min_length = min_length
         self.stop_words = [w.lower().strip() for w in stop_words if w.strip()]
 
@@ -50,15 +50,7 @@ class PostFilter:
         if not clean_text:
             return FilterResult(passed=False, reason="Пост не містить тексту")
 
-        # 3. Перевірка мінімальної довжини тексту (без зайвих пробілів та посилань)
-        text_without_urls = re.sub(r"https?://\S+", "", clean_text).strip()
-        if len(text_without_urls) < self.min_length:
-            return FilterResult(
-                passed=False,
-                reason=f"Текст коротший за мінімальну довжину ({len(text_without_urls)} < {self.min_length})",
-            )
-
-        # 4. Перевірка на рекламні стоп-слова
+        # 3. Перевірка на рекламні стоп-слова
         lowered = clean_text.lower()
         for word in self.stop_words:
             if word in lowered:

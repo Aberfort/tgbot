@@ -43,7 +43,7 @@ class Settings(BaseSettings):
 
     # Модерація та фільтри
     moderation: bool = Field(default=True, alias="MODERATION")
-    min_length: int = Field(default=80, alias="MIN_LENGTH", ge=1)
+    min_length: int = Field(default=0, alias="MIN_LENGTH", ge=0)
     stop_words_raw: str = Field(default="", alias="STOP_WORDS")
     max_media_size_mb: int = Field(default=50, alias="MAX_MEDIA_SIZE_MB", ge=1, le=2000)
 

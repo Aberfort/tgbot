@@ -98,6 +98,12 @@ class Storage:
         )
         await self.conn.commit()
 
+    async def cleanup_skipped_posts(self) -> int:
+        """Видаляє записи зі статусом SKIPPED, щоб вони могли бути повторно оброблені."""
+        cursor = await self.conn.execute("DELETE FROM posts WHERE status = ?", (PostStatus.SKIPPED.value,))
+        await self.conn.commit()
+        return cursor.rowcount
+
     async def is_duplicate(
         self,
         source_msg_id: int,
