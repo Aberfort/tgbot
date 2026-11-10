@@ -440,3 +440,4 @@ class SMMManager:
         except Exception as exc:
             logger.error("Не вдалося відправити опитування в %s: %s", chat_id, exc)
             return False
+
