@@ -168,7 +168,8 @@ class Rewriter:
         # Ізолюємо потенційно небезпечний вхідний текст від закриття тегу </source_post>
         safe_source = original_text.replace("</source_post>", "")
         user_prompt = (
-            f"Ліміт довжини готового тексту (разом із тегами): не більше {max_body_len} символів.\n\n"
+            f"Пиши коротко і по суті, зберігаючи приблизний обсяг оригіналу (без домислів та 'води'). "
+            f"Технічний максимум Telegram: {max_body_len} символів.\n\n"
             f"<source_post>\n{safe_source}\n</source_post>"
         )
 
