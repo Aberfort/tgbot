@@ -25,6 +25,7 @@ class PostStatus(str, Enum):
     PUBLISHED = "published"
     FAILED = "failed"
     SKIPPED = "skipped"
+    EXPIRED = "expired"
 
 
 @dataclass
@@ -246,6 +247,15 @@ class Storage:
         if row is None:
             return None
         return self._row_to_record(row)
+
+    async def get_queued_count(self) -> int:
+        """Повертає кількість постів, які зараз чекають публікації у статусах QUEUED або REWRITTEN."""
+        cursor = await self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM posts WHERE status IN (?, ?)",
+            (PostStatus.QUEUED.value, PostStatus.REWRITTEN.value),
+        )
+        row = await cursor.fetchone()
+        return int(row["cnt"]) if row else 0
 
     async def get_published_count_last_hour(self) -> int:
         """Повертає кількість опублікованих постів за останні 60 хвилин."""

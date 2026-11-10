@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -80,12 +80,28 @@ class Publisher:
 
     async def enqueue(self, post_id: int) -> None:
         """Зберігає статус QUEUED у БД та додає ID поста до черги на публікацію."""
+        # Перевіряємо розмір живої черги перед додаванням нового поста
+        active_queued = await self.storage.get_queued_count()
+        if active_queued >= self.settings.max_queued_posts:
+            logger.warning(
+                "Черга переповнена (активних у черзі: %d >= ліміт %d). Пост id=%d скасовано як застарілий (EXPIRED).",
+                active_queued,
+                self.settings.max_queued_posts,
+                post_id,
+            )
+            await self.storage.update_status(post_id, PostStatus.EXPIRED)
+            post = await self.storage.get_post(post_id)
+            if post and post.media_paths:
+                self.cleanup_media(post.media_paths)
+            return
+
         await self.storage.update_status(post_id, PostStatus.QUEUED)
         await self._queue.put(post_id)
         logger.info(
-            "Пост id=%d додано в чергу публікації (у черзі: %d).",
+            "Пост id=%d додано в чергу публікації (у черзі: %d, максимум: %d).",
             post_id,
             self._queue.qsize(),
+            self.settings.max_queued_posts,
         )
 
     def _is_quiet_hour(self, now_time: time) -> bool:
@@ -137,6 +153,30 @@ class Publisher:
                 if post.status == PostStatus.PUBLISHED:
                     logger.info("Пост id=%d вже був опублікований раніше. Пропускаємо.", post_id)
                     continue
+                if post.status == PostStatus.EXPIRED:
+                    logger.info("Пост id=%d скасовано як застарілий (EXPIRED). Пропускаємо.", post_id)
+                    continue
+
+                # Перевірка TTL (Time To Live / термін придатності) поста
+                try:
+                    created_dt = datetime.fromisoformat(post.created_at)
+                    now_utc = datetime.now(timezone.utc)
+                    if created_dt.tzinfo is None:
+                        created_dt = created_dt.replace(tzinfo=timezone.utc)
+                    age_minutes = (now_utc - created_dt).total_seconds() / 60.0
+                    if age_minutes > self.settings.post_ttl_minutes:
+                        logger.warning(
+                            "Пост id=%d застарів у черзі (вік: %.1f хв > TTL %d хв). Пропускаємо як EXPIRED.",
+                            post_id,
+                            age_minutes,
+                            self.settings.post_ttl_minutes,
+                        )
+                        await self.storage.update_status(post.id, PostStatus.EXPIRED)
+                        if post.media_paths:
+                            self.cleanup_media(post.media_paths)
+                        continue
+                except Exception as parse_err:
+                    logger.warning("Не вдалося перевірити TTL для поста id=%d: %s", post_id, parse_err)
 
                 await self.publish_post_now(post)
 

@@ -49,8 +49,10 @@ class Settings(BaseSettings):
 
     # Оформлення та ліміти
     footer_text: str = Field(default="", alias="FOOTER_TEXT")
-    publish_delay_sec: int = Field(default=30, alias="PUBLISH_DELAY_SEC", ge=0)
-    max_posts_per_hour: int = Field(default=10, alias="MAX_POSTS_PER_HOUR", ge=1)
+    publish_delay_sec: int = Field(default=300, alias="PUBLISH_DELAY_SEC", ge=0)
+    max_posts_per_hour: int = Field(default=4, alias="MAX_POSTS_PER_HOUR", ge=1)
+    max_queued_posts: int = Field(default=4, alias="MAX_QUEUED_POSTS", ge=1)
+    post_ttl_minutes: int = Field(default=45, alias="POST_TTL_MINUTES", ge=5)
     quiet_hours: str = Field(default="", alias="QUIET_HOURS")
 
     # Шляхи та логування
