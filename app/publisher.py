@@ -203,11 +203,16 @@ class Publisher:
             try:
                 if existing_media:
                     # Повторно завантажуємо файли у цільовий канал (без forward, щоб не було мітки джерела)
-                    file_arg = existing_media if len(existing_media) > 1 else existing_media[0]
+                    if len(existing_media) > 1:
+                        file_arg = existing_media
+                        caption_arg = [text_to_send] + [""] * (len(existing_media) - 1)
+                    else:
+                        file_arg = existing_media[0]
+                        caption_arg = text_to_send
                     await self.bot_client.send_file(
                         entity=self.settings.target_channel,
                         file=file_arg,
-                        caption=text_to_send,
+                        caption=caption_arg,
                         parse_mode="html",
                     )
                 else:

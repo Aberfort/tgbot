@@ -57,6 +57,9 @@ class SMMManager:
         self._stopping = False
         self._last_poll_date: Optional[str] = None
         self._linked_discussion_id: Optional[int] = None
+        self._comment_lock = asyncio.Lock()
+        self._commented_grouped_ids: set[int] = set()
+        self._commented_msg_ids: set[int] = set()
 
     @staticmethod
     def _smm_menu_keyboard() -> list[list[Button]]:
@@ -171,13 +174,35 @@ class SMMManager:
             logger.info("Активовано авто-перший коментар у групі обговорень id=%d", self._linked_discussion_id)
 
     async def _on_discussion_forwarded_post(self, event: events.NewMessage.Event) -> None:
-        """Автоматично залишає перший залучаючий коментар під кожним новим постом у групі обговорень."""
+        """Автоматично залишає перший залучаючий коментар під кожним новим постом у групі обговорень (1 коментар на весь альбом)."""
         msg = event.message
         if not msg or not getattr(msg, "fwd_from", None):
             return
         # Перевіряємо, що це автоматичний репост із каналу в групу обговорень
         if not getattr(msg.fwd_from, "saved_from_peer", None) and not getattr(msg, "post", False):
             return
+
+        grouped_id = getattr(msg, "grouped_id", None)
+        async with self._comment_lock:
+            if msg.id in self._commented_msg_ids:
+                return
+            if grouped_id is not None:
+                if grouped_id in self._commented_grouped_ids:
+                    logger.debug(
+                        "Пропускаємо повторний коментар для медіа-альбому grouped_id=%s (msg_id=%d).",
+                        grouped_id,
+                        msg.id,
+                    )
+                    return
+                self._commented_grouped_ids.add(int(grouped_id))
+            self._commented_msg_ids.add(int(msg.id))
+
+            # Обмежуємо розмір кешу в пам'яті
+            if len(self._commented_grouped_ids) > 500:
+                self._commented_grouped_ids.clear()
+            if len(self._commented_msg_ids) > 500:
+                self._commented_msg_ids.clear()
+
         try:
             await asyncio.sleep(3)
             comment_text = random.choice(FIRST_COMMENT_TEMPLATES)
@@ -186,7 +211,11 @@ class SMMManager:
                 message=comment_text,
                 reply_to=msg.id,
             )
-            logger.info("Додано авто-перший коментар у групі обговорень до msg_id=%d.", msg.id)
+            logger.info(
+                "Додано авто-перший коментар у групі обговорень до msg_id=%d (grouped_id=%s).",
+                msg.id,
+                grouped_id,
+            )
         except Exception as exc:
             logger.debug("Не вдалося залишити перший коментар: %s", exc)
 

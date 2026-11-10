@@ -205,7 +205,10 @@ class SourceListener:
         if msg.grouped_id:
             try:
                 latest = await self.user_client.get_messages(self.settings.source_channel, limit=15)
-                album_msgs = [m for m in latest if m.grouped_id == msg.grouped_id] or [msg]
+                album_msgs = sorted(
+                    [m for m in latest if m.grouped_id == msg.grouped_id],
+                    key=lambda m: m.id,
+                ) or [msg]
                 await self._process_messages(album_msgs, grouped_id=msg.grouped_id)
             except Exception as exc:
                 logger.error("Помилка обробки відредагованого альбому grouped_id=%s: %s", msg.grouped_id, exc)
@@ -221,6 +224,7 @@ class SourceListener:
         if not messages:
             return
 
+        messages = sorted(messages, key=lambda m: m.id)
         primary_msg = messages[0]
         source_msg_id = int(primary_msg.id)
 
@@ -241,7 +245,10 @@ class SourceListener:
             try:
                 if grouped_id:
                     latest = await self.user_client.get_messages(self.settings.source_channel, limit=15)
-                    matched = [m for m in latest if m.grouped_id == grouped_id]
+                    matched = sorted(
+                        [m for m in latest if m.grouped_id == grouped_id],
+                        key=lambda m: m.id,
+                    )
                     if matched:
                         messages = matched
                 else:
