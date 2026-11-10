@@ -131,6 +131,8 @@ class Rewriter:
         clean_body = sanitize_telegram_html(body_text)
 
         if self.footer_text:
+            if clean_body.endswith(self.footer_text):
+                clean_body = clean_body[: -len(self.footer_text)].rstrip()
             max_body = limit - len(self.footer_text) - 2
             if len(clean_body) > max_body:
                 clean_body = self._safe_truncate(clean_body, max_body)

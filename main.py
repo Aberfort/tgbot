@@ -17,6 +17,7 @@ from app.listener import SourceListener
 from app.moderation import ModerationManager
 from app.publisher import Publisher
 from app.rewriter import Rewriter
+from app.smm import SMMManager
 from app.storage import Storage
 
 
@@ -123,6 +124,13 @@ async def run() -> None:
         publisher=publisher,
         moderation=moderation,
     )
+    smm_manager = SMMManager(
+        user_client=user_client,
+        bot_client=bot_client,
+        settings=settings,
+        storage=storage,
+        rewriter=rewriter,
+    )
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -160,10 +168,11 @@ async def run() -> None:
             getattr(target_entity, "title", settings.target_channel),
         )
 
-        # Реєстрація обробників та запуск черги публікації
+        # Реєстрація обробників та запуск черги публікації й SMM-автоматизації
         moderation.register_handlers()
         listener.register_handlers()
         await publisher.start()
+        await smm_manager.start()
 
         logger.info(
             "Бот повністю готовий до роботи! Режим модерації: %s",
@@ -175,6 +184,7 @@ async def run() -> None:
 
     finally:
         logger.info("Виконується graceful shutdown...")
+        await smm_manager.stop()
         await listener.stop()
         await publisher.stop()
         if user_client.is_connected():

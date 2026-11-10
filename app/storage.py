@@ -271,6 +271,32 @@ class Storage:
         row = await cursor.fetchone()
         return int(row["cnt"]) if row else 0
 
+    async def get_recent_published_posts(self, limit: int = 3) -> list[PostRecord]:
+        """Повертає останні опубліковані пости для генерації TikTok/Reels сценаріїв та аналітики."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM posts WHERE status = ? ORDER BY id DESC LIMIT ?",
+            (PostStatus.PUBLISHED.value, limit),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_record(r) for r in rows]
+
+    async def get_stats_summary(self) -> dict[str, int]:
+        """Повертає зведену статистику постів за статусами та за останні 24 години."""
+        day_ago = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        cursor = await self.conn.execute(
+            "SELECT status, COUNT(*) AS cnt FROM posts GROUP BY status"
+        )
+        rows = await cursor.fetchall()
+        stats = {str(r["status"]): int(r["cnt"]) for r in rows}
+
+        cur_24h = await self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM posts WHERE status = ? AND published_at >= ?",
+            (PostStatus.PUBLISHED.value, day_ago),
+        )
+        row_24h = await cur_24h.fetchone()
+        stats["published_24h"] = int(row_24h["cnt"]) if row_24h else 0
+        return stats
+
     async def get_queued_post_ids(self, include_rewritten: bool = False) -> list[int]:
         """Повертає список ID постів, які очікували публікації до перезапуску бота."""
         statuses = [PostStatus.QUEUED.value]

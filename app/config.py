@@ -48,12 +48,17 @@ class Settings(BaseSettings):
     max_media_size_mb: int = Field(default=50, alias="MAX_MEDIA_SIZE_MB", ge=1, le=2000)
 
     # Оформлення та ліміти
-    footer_text: str = Field(default="", alias="FOOTER_TEXT")
+    footer_text: str = Field(
+        default='<a href="https://t.me/btsdailyhub">BTS Daily Hub 💜</a>',
+        alias="FOOTER_TEXT",
+    )
     publish_delay_sec: int = Field(default=300, alias="PUBLISH_DELAY_SEC", ge=0)
     max_posts_per_hour: int = Field(default=4, alias="MAX_POSTS_PER_HOUR", ge=1)
     max_queued_posts: int = Field(default=4, alias="MAX_QUEUED_POSTS", ge=1)
     post_ttl_minutes: int = Field(default=45, alias="POST_TTL_MINUTES", ge=5)
     quiet_hours: str = Field(default="", alias="QUIET_HOURS")
+    daily_poll_enabled: bool = Field(default=True, alias="DAILY_POLL_ENABLED")
+    daily_poll_hour_utc: int = Field(default=17, alias="DAILY_POLL_HOUR_UTC", ge=0, le=23)
 
     # Шляхи та логування
     db_path: Path = Field(default=Path("data/bot.db"), alias="DB_PATH")
