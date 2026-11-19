@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import random
 import re
+import shutil
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from google.genai import types as genai_types
@@ -18,6 +21,11 @@ from telethon.tl import functions, types
 from app.config import Settings
 from app.rewriter import Rewriter
 from app.storage import Storage
+from app.video_maker import (
+    build_overlay_png,
+    render_vertical_from_photos,
+    render_vertical_from_video,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +68,16 @@ class SMMManager:
         self._comment_lock = asyncio.Lock()
         self._commented_grouped_ids: set[int] = set()
         self._commented_msg_ids: set[int] = set()
+        self._video_lock = asyncio.Lock()
+        self._rendered_video_keys: set[str] = set()
 
     @staticmethod
     def _smm_menu_keyboard() -> list[list[Button]]:
         """Клавіатура SMM-панелі для адміністратора."""
         return [
+            [
+                Button.inline("🎥 Змонтувати TikTok-відео", data=b"smm:video"),
+            ],
             [
                 Button.inline("🎬 Сценарій TikTok / Reels", data=b"smm:tiktok"),
                 Button.inline("📊 Запустити опитування", data=b"smm:poll"),
@@ -220,7 +233,7 @@ class SMMManager:
             logger.debug("Не вдалося залишити перший коментар: %s", exc)
 
     async def _on_admin_command(self, event: events.NewMessage.Event) -> None:
-        """Обробляє команди /start, /smm, /tiktok, /poll, /stats від адміністратора."""
+        """Обробляє команди /start, /smm, /video, /tiktok, /poll, /stats від адміністратора."""
         if event.sender_id != self.settings.admin_user_id:
             return
         raw = (event.raw_text or "").strip().lower()
@@ -230,6 +243,8 @@ class SMMManager:
         cmd = raw.split()[0]
         if cmd in ("/start", "/smm", "/help"):
             await self._send_smm_dashboard()
+        elif cmd == "/video":
+            await self._handle_render_tiktok_video()
         elif cmd == "/tiktok":
             await self._handle_generate_tiktok()
         elif cmd == "/poll":
@@ -246,7 +261,10 @@ class SMMManager:
             return
 
         action = data_str.split(":", maxsplit=1)[1]
-        if action == "tiktok":
+        if action == "video":
+            await event.answer("Запускаю авто-монтаж вертикального відео...")
+            await self._handle_render_tiktok_video()
+        elif action == "tiktok":
             await event.answer("Генерую вірусний сценарій для TikTok / Reels...")
             await self._handle_generate_tiktok()
         elif action == "poll":
@@ -265,7 +283,8 @@ class SMMManager:
             "• <b>Вірусний підпис:</b> клікабельне посилання в кожному пості\n"
             "• <b>Вечірній інтерактив:</b> щодня о 19:00 (за Києвом)\n"
             "• <b>Ліміти:</b> до 4 постів/год, інтервал 5 хв, TTL 45 хв\n\n"
-            "Оберіть дію нижче або використовуйте команди <code>/tiktok</code>, <code>/poll</code>, <code>/stats</code>:"
+            "Оберіть дію нижче або використовуйте команди "
+            "<code>/video</code>, <code>/tiktok</code>, <code>/poll</code>, <code>/stats</code>:"
         )
         await self.bot_client.send_message(
             entity=self.settings.admin_user_id,
@@ -273,6 +292,210 @@ class SMMManager:
             parse_mode="html",
             buttons=self._smm_menu_keyboard(),
         )
+
+    async def _handle_render_tiktok_video(self) -> None:
+        """Бере свіжий пост із медіа в каналі, генерує хук через Gemini, монтує 9:16 .mp4 і надсилає адміну."""
+        if self._video_lock.locked():
+            await self.bot_client.send_message(
+                entity=self.settings.admin_user_id,
+                message="⏳ Вже монтується попереднє відео. Зачекайте кілька секунд...",
+            )
+            return
+
+        async with self._video_lock:
+            status_msg = await self.bot_client.send_message(
+                entity=self.settings.admin_user_id,
+                message="🎥 <b>Підбираю свіжий пост із медіа та монтую TikTok-відео (9:16)...</b>\nЗачекайте ~10–25 сек.",
+                parse_mode="html",
+            )
+
+            work_dir = self.settings.media_tmp_dir / f"tiktok_{int(datetime.now(timezone.utc).timestamp())}"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                messages = await self.user_client.get_messages(self.settings.target_channel, limit=25)
+                if not messages:
+                    await self.bot_client.send_message(
+                        entity=self.settings.admin_user_id,
+                        message="⚠️ У цільовому каналі поки немає постів для монтажу.",
+                    )
+                    return
+
+                # Групуємо повідомлення у пости (зберігаючи порядок від найновіших до старіших)
+                grouped_order: list[str] = []
+                grouped_map: dict[str, list] = {}
+                for m in messages:
+                    if not m or (not getattr(m, "photo", None) and not getattr(m, "video", None)):
+                        continue
+                    key = f"g:{m.grouped_id}" if getattr(m, "grouped_id", None) else f"m:{m.id}"
+                    if key not in grouped_map:
+                        grouped_order.append(key)
+                        grouped_map[key] = []
+                    grouped_map[key].append(m)
+
+                if not grouped_order:
+                    await self.bot_client.send_message(
+                        entity=self.settings.admin_user_id,
+                        message="⚠️ Серед останніх постів каналу не знайдено фото або відео для монтажу.",
+                    )
+                    return
+
+                # Обираємо найсвіжіший пост, для якого ще не рендерили відео (щоб повторний /video брав наступний)
+                chosen_key = next((k for k in grouped_order if k not in self._rendered_video_keys), None)
+                if chosen_key is None:
+                    self._rendered_video_keys.clear()
+                    chosen_key = grouped_order[0]
+                self._rendered_video_keys.add(chosen_key)
+
+                post_msgs = sorted(grouped_map[chosen_key], key=lambda m: m.id)
+                post_text = "\n".join(
+                    (m.raw_text or "").strip() for m in post_msgs if (m.raw_text or "").strip()
+                ).strip()
+                # Прибираємо наш власний підпис каналу з контексту для LLM
+                clean_post_text = re.sub(r"BTS Daily Hub\s*💜?", "", post_text).strip()
+
+                # Завантажуємо медіафайли (пріоритет: відео, інакше до 4 фото)
+                video_msg = next((m for m in post_msgs if getattr(m, "video", None)), None)
+                downloaded_video: Optional[Path] = None
+                downloaded_photos: list[Path] = []
+
+                if video_msg is not None:
+                    file_size = getattr(video_msg.file, "size", 0) or 0
+                    if file_size <= self.settings.max_media_size_mb * 1024 * 1024:
+                        dl = await self.user_client.download_media(video_msg, file=str(work_dir / "source_video.mp4"))
+                        if dl and Path(dl).exists():
+                            downloaded_video = Path(dl)
+
+                if downloaded_video is None:
+                    photo_msgs = [m for m in post_msgs if getattr(m, "photo", None)][:4]
+                    for idx, pm in enumerate(photo_msgs):
+                        dl = await self.user_client.download_media(pm, file=str(work_dir / f"photo_{idx}.jpg"))
+                        if dl and Path(dl).exists():
+                            downloaded_photos.append(Path(dl))
+
+                if downloaded_video is None and not downloaded_photos:
+                    await self.bot_client.send_message(
+                        entity=self.settings.admin_user_id,
+                        message="⚠️ Не вдалося завантажити медіафайли поста (можливо, відео перевищує ліміт розміру).",
+                    )
+                    return
+
+                # Генеруємо через Gemini хук на екран + готовий опис для TikTok/Reels російською
+                channel_handle = (
+                    f"@{str(self.settings.target_channel).lstrip('@')}"
+                    if not isinstance(self.settings.target_channel, int)
+                    else "@btsdailyhub"
+                )
+                hook, sub_cta, tiktok_caption = await self._generate_tiktok_video_texts(
+                    clean_post_text,
+                    channel_handle=channel_handle,
+                )
+
+                # Створюємо оверлей та монтуємо 9:16 .mp4
+                overlay_path = work_dir / "overlay.png"
+                await asyncio.to_thread(
+                    build_overlay_png,
+                    overlay_path,
+                    hook,
+                    sub_cta,
+                    channel_handle,
+                )
+
+                output_mp4 = work_dir / "tiktok_ready.mp4"
+                if downloaded_video is not None:
+                    await render_vertical_from_video(
+                        video_path=downloaded_video,
+                        overlay_path=overlay_path,
+                        output_path=output_mp4,
+                        max_duration=15,
+                    )
+                else:
+                    await render_vertical_from_photos(
+                        photo_paths=downloaded_photos,
+                        overlay_path=overlay_path,
+                        output_path=output_mp4,
+                        work_dir=work_dir,
+                    )
+
+                if not output_mp4.exists():
+                    raise RuntimeError("Підсумковий файл відео не створено.")
+
+                # Відправляємо готове відео та опис для копіювання
+                await self.bot_client.send_file(
+                    entity=self.settings.admin_user_id,
+                    file=str(output_mp4),
+                    caption=f"✅ <b>Готове вертикальне відео (9:16) для TikTok / Reels / Shorts!</b>\nЗаголовок на відео: <i>{html.escape(hook)}</i>",
+                    parse_mode="html",
+                    supports_streaming=True,
+                )
+                await self.bot_client.send_message(
+                    entity=self.settings.admin_user_id,
+                    message=(
+                        "📝 <b>Готовий опис для TikTok / Reels (натисніть, щоб скопіювати):</b>\n\n"
+                        f"<code>{html.escape(tiktok_caption)}</code>\n\n"
+                        "💡 <i>Порада: збережіть відео на телефон, додайте трендовий звук BTS прямо в TikTok і публікуйте!</i>"
+                    ),
+                    parse_mode="html",
+                    buttons=self._smm_menu_keyboard(),
+                )
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+                logger.info("Змонтовано та надіслано адміну TikTok-відео для поста %s.", chosen_key)
+
+            except Exception as exc:
+                logger.exception("Помилка авто-монтажу TikTok-відео: %s", exc)
+                await self.bot_client.send_message(
+                    entity=self.settings.admin_user_id,
+                    message=f"⚠️ Не вдалося змонтувати відео: <code>{html.escape(str(exc))}</code>",
+                    parse_mode="html",
+                    buttons=self._smm_menu_keyboard(),
+                )
+            finally:
+                shutil.rmtree(work_dir, ignore_errors=True)
+
+    async def _generate_tiktok_video_texts(
+        self,
+        post_text: str,
+        channel_handle: str,
+    ) -> tuple[str, str, str]:
+        """Генерує короткий заголовок-хук на екран, підзаголовок та опис із хештегами для TikTok російською."""
+        prompt = (
+            "Ты — топ-креатор вирусных TikTok/Reels видео про BTS и K-pop.\n"
+            "На основе этой новости из нашего Telegram-канала сделай тексты для 10-15 секундного ролика на РУССКОМ ЯЗЫКЕ.\n\n"
+            f"Новость:\n{post_text[:800] or 'Свежее обновление BTS!'}\n\n"
+            "Верни СТРОГО валидный JSON-объект без Markdown-оберток:\n"
+            "{\n"
+            '  "hook": "Яркий короткий заголовок-хук на экран (4-8 слов, БЕЗ эмодзи, например: Тэхён снова побил рекорд в Корее!)",\n'
+            '  "sub_cta": "Короткая интрига внизу экрана (до 45 символов, БЕЗ эмодзи, например: Все фото в 4K уже в нашем ТГ)",\n'
+            f'  "caption": "Живое описание под видео с эмодзи, призывом перейти в ТГ {channel_handle} (ссылка в профиле / поиск в ТГ) и 8-10 релевантными хештегами (#bts #army #kpop #бтс ...)"\n'
+            "}"
+        )
+        try:
+            response = await self.rewriter.client.aio.models.generate_content(
+                model=self.rewriter.model_name,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(temperature=0.75),
+            )
+            raw = (response.text or "").strip()
+            raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
+            data = json.loads(raw)
+            hook = str(data.get("hook") or "").strip()
+            sub_cta = str(data.get("sub_cta") or "").strip()
+            caption = str(data.get("caption") or "").strip()
+            if hook and caption:
+                return hook, sub_cta or "Подробности и HD-фото уже в нашем ТГ", caption
+        except Exception as err:
+            logger.warning("Фолбек текстів TikTok-відео через помилку Gemini: %s", err)
+
+        fallback_hook = "Срочное обновление BTS!"
+        fallback_sub = "Все подробности и HD-фото уже в нашем ТГ"
+        fallback_caption = (
+            f"💜 Свежие новости BTS уже вышли! Все подробности, переводы и фото в высоком качестве "
+            f"ищите в нашем Telegram-канале {channel_handle} (ссылка в шапке профиля) ✨\n\n"
+            "#bts #army #kpop #бтс #тэхён #чонгук #чимин #корея #рек #fyp"
+        )
+        return fallback_hook, fallback_sub, fallback_caption
 
     async def _handle_send_stats(self) -> None:
         """Формує та відправляє статистику роботи бота адміністратору."""

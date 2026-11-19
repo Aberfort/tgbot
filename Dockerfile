@@ -7,11 +7,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Системні залежності для компіляції cryptg (прискорює роботу Telethon з медіа)
+# Системні залежності для компіляції cryptg та авто-монтажу TikTok/Reels відео (ffmpeg + кириличні шрифти)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libc6-dev \
     tzdata \
+    ffmpeg \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Спочатку копіюємо requirements.txt для кешування шарів Docker
